@@ -9,10 +9,14 @@
 #include <gio/gunixinputstream.h>
 #include <libnotify/notify.h>
 
-#define TIMEOUT 10000
+#define DEFAULT_TIMEOUT 10000
 
 struct message_source {
 	GDataInputStream *lines;
+	NotifyUrgency urgency;
+	gint timeout;
+	char *icon;
+	char *prefix;
 };
 
 static unsigned int message_sources_alive = 0;
@@ -34,22 +38,28 @@ static void message_source_finish_read(GObject *stream, GAsyncResult *result, gp
 	if (line && *line != '\0') {
 		NotifyNotification *notify;
 		gchar *utf8 = NULL;
+		const gchar *notify_message = line;
 		
-		if (g_utf8_validate(line, -1, NULL))
-			utf8 = line;
-		else {
+		if (!g_utf8_validate(line, -1, NULL)) {
 			utf8 = g_locale_to_utf8(line, -1, NULL, NULL, NULL);
-			if (!utf8)
-				utf8 = g_strdup("ERROR: Read invalid input line'");
+			if (utf8)
+				notify_message = utf8;
+			else
+				notify_message = "ERROR: Read invalid input line'";
 		}
 
-		notify = notify_notification_new(utf8, NULL, NULL);
-		notify_notification_set_urgency(notify, NOTIFY_URGENCY_LOW);
-		notify_notification_set_timeout(notify, TIMEOUT);
+		if (source->prefix) {
+			gchar *tmp = g_strconcat(source->prefix, notify_message, NULL);
+			g_free(utf8);
+			notify_message = utf8 = tmp;
+		}
+
+		notify = notify_notification_new(notify_message, NULL, source->icon);
+		notify_notification_set_urgency(notify, source->urgency);
+		notify_notification_set_timeout(notify, source->timeout);
 		notify_notification_show(notify, NULL);
 		g_object_unref(G_OBJECT(notify));
-		if (utf8 != line)
-			g_free(utf8);
+		g_free(utf8);
 	}
 
 	if (line != NULL && error == NULL)
@@ -57,6 +67,8 @@ static void message_source_finish_read(GObject *stream, GAsyncResult *result, gp
 	else {
 		/* TODO: print errors */
 		g_object_unref(stream);
+		g_free(source->icon);
+		g_free(source->prefix);
 		g_free(source);
 		if (--message_sources_alive == 0)
 			g_main_loop_quit(main_loop);
@@ -75,10 +87,18 @@ static struct message_source *message_source_add_from_fd(int fd, gboolean close_
 	if (!source)
 		return NULL;
 
+	/* Apply default settings */
+	source->urgency = NOTIFY_URGENCY_LOW;
+	source->timeout = DEFAULT_TIMEOUT;
+	source->icon = NULL;
+	source->prefix = NULL;
+
+	/* Set up the stream */
 	in = g_unix_input_stream_new(fd, close_fd);
 	source->lines = g_data_input_stream_new(in);
 	g_object_unref(G_OBJECT(in));
 
+	/* And get it going */
 	message_sources_alive++;
 	message_source_start_read(source);
 
